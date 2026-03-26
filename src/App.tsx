@@ -33,6 +33,7 @@ import type {
   FlipState,
   SavedSelection,
   TrimRange,
+  UpscaleQuality,
   VideoSource,
 } from './lib/types'
 
@@ -62,6 +63,7 @@ type SelectionExportClip = {
   crop: CropRect
   trim: TrimRange
   flip: FlipState
+  upscaleQuality: UpscaleQuality
   simulatorExtend: boolean
   scale: {
     width: number
@@ -194,6 +196,7 @@ function App() {
   const [trim, setTrim] = useState<TrimRange>({ start: 0, end: 0 })
   const [aspectPreset, setAspectPreset] = useState<AspectPresetId>('source')
   const [scaleMode, setScaleMode] = useState<'crop' | 'preset'>('crop')
+  const [upscaleQuality, setUpscaleQuality] = useState<UpscaleQuality>('standard')
   const [simulatorExtend, setSimulatorExtend] = useState(false)
   const [flip, setFlip] = useState<FlipState>({
     horizontal: false,
@@ -265,6 +268,7 @@ function App() {
     }
 
     return savedSelections.map((selection) => {
+      const selectionUpscaleQuality = selection.upscaleQuality ?? 'standard'
       const selectionCrop = normalizeCropForExport(selection.crop, video.width, video.height)
       const selectionRatio = getAspectRatio(selection.aspectPreset, video.width, video.height)
       const selectionScale =
@@ -278,6 +282,7 @@ function App() {
         crop: selectionCrop,
         trim: selection.trim,
         flip: selection.flip,
+        upscaleQuality: selectionUpscaleQuality,
         simulatorExtend: selection.simulatorExtend,
         scale: {
           width: selection.simulatorExtend ? SIMULATOR_EXTEND_OUTPUT.width : selectionScale.width,
@@ -327,10 +332,11 @@ function App() {
         width: selectedOutput.width,
         height: selectedOutput.height,
       },
+      upscaleQuality,
       simulatorExtend,
       video.hasAudio,
     )
-  }, [flip, normalizedCrop, selectedOutput, simulatorExtend, trim, video])
+  }, [flip, normalizedCrop, selectedOutput, simulatorExtend, trim, upscaleQuality, video])
 
   const trimMinimumGap = useMemo(() => {
     if (!video) {
@@ -913,6 +919,7 @@ function App() {
     setActiveSelectionId(selection.id)
     setAspectPreset(selection.aspectPreset)
     setScaleMode(selection.scaleMode)
+    setUpscaleQuality(selection.upscaleQuality ?? 'standard')
     setSimulatorExtend(selection.simulatorExtend)
     setFlip(selection.flip)
     setTrim(selection.trim)
@@ -951,6 +958,7 @@ function App() {
       flip,
       aspectPreset,
       scaleMode,
+      upscaleQuality,
       simulatorExtend,
       thumbnailUrl,
     }
@@ -991,6 +999,7 @@ function App() {
         trim: clip.trim,
         flip: clip.flip,
         scale: clip.scale,
+        upscaleQuality: clip.upscaleQuality,
         simulatorExtend: clip.simulatorExtend,
       })),
     }
@@ -1029,6 +1038,7 @@ function App() {
         width: selectedOutput.width,
         height: selectedOutput.height,
       },
+      upscaleQuality,
       simulatorExtend,
       includeAudio: video.hasAudio,
     }
@@ -1372,6 +1382,7 @@ function App() {
                             {exportClip.scale.width} × {exportClip.scale.height}
                           </span>
                         ) : null}
+                        {selection.upscaleQuality === 'high' ? <span>High-quality upscale</span> : null}
                       </div>
                     </button>
                     <button
@@ -1481,6 +1492,32 @@ function App() {
               ) : null}
             </div>
 
+            <div className="field field--full">
+              <span className="field-label">Upscale quality</span>
+              <div className="toolbar toolbar--compact">
+                <button
+                  className={`tool-button tool-button--small ${upscaleQuality === 'standard' ? 'tool-button--accent' : ''}`}
+                  onClick={() => setUpscaleQuality('standard')}
+                >
+                  Standard
+                </button>
+                <button
+                  className={`tool-button tool-button--small ${upscaleQuality === 'high' ? 'tool-button--accent' : ''}`}
+                  onClick={() => setUpscaleQuality('high')}
+                >
+                  High quality
+                </button>
+              </div>
+              <span className="field-help">
+                High quality uses Lanczos scaling with light sharpening when the export is larger than the crop.
+              </span>
+              {simulatorExtend ? (
+                <span className="field-help">
+                  Simulator extend already uses Lanczos scaling for its stretched side fills.
+                </span>
+              ) : null}
+            </div>
+
             <label className="field field--full field--toggle">
               <span className="field-label">Simulator extend export</span>
               <input
@@ -1542,6 +1579,10 @@ function App() {
             <div>
               <span>Export composition</span>
               <strong>{simulatorExtend ? 'Simulator extend 5760 × 1080' : 'Direct crop export'}</strong>
+            </div>
+            <div>
+              <span>Upscale processing</span>
+              <strong>{upscaleQuality === 'high' ? 'Lanczos + light sharpen' : 'Standard scaling'}</strong>
             </div>
           </div>
 

@@ -22,6 +22,8 @@ export type OutputSize = {
   height: number
 }
 
+export type UpscaleQuality = 'standard' | 'high'
+
 export type VideoSource = {
   path?: string
   name: string
@@ -40,6 +42,7 @@ export type ExportPayload = {
   trim: TrimRange
   flip: FlipState
   scale: OutputSize
+  upscaleQuality: UpscaleQuality
   simulatorExtend: boolean
   includeAudio: boolean
 }
@@ -57,6 +60,7 @@ export type SavedSelection = {
   flip: FlipState
   aspectPreset: AspectPresetId
   scaleMode: 'crop' | 'preset'
+  upscaleQuality: UpscaleQuality
   simulatorExtend: boolean
   thumbnailUrl: string
 }
@@ -72,6 +76,7 @@ export type BatchExportPayload = {
     trim: TrimRange
     flip: FlipState
     scale: OutputSize
+    upscaleQuality: UpscaleQuality
     simulatorExtend: boolean
   }>
 }

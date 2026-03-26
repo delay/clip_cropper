@@ -58,6 +58,13 @@ struct ScaleSize {
     height: u32,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum UpscaleQuality {
+    Standard,
+    High,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExportRequest {
@@ -67,6 +74,7 @@ struct ExportRequest {
     trim: TrimRange,
     flip: FlipState,
     scale: ScaleSize,
+    upscale_quality: UpscaleQuality,
     simulator_extend: bool,
     include_audio: bool,
 }
@@ -79,6 +87,7 @@ struct BatchClip {
     trim: TrimRange,
     flip: FlipState,
     scale: ScaleSize,
+    upscale_quality: UpscaleQuality,
     simulator_extend: bool,
 }
 
@@ -174,6 +183,7 @@ fn export_single_to_path(request: &ExportRequest, output_path: &Path) -> Result<
         trim: request.trim.clone(),
         flip: request.flip.clone(),
         scale: request.scale.clone(),
+        upscale_quality: request.upscale_quality.clone(),
         simulator_extend: request.simulator_extend,
     };
 
@@ -485,7 +495,15 @@ fn build_filter_chain(clip: &BatchClip) -> String {
     }
 
     if clip.scale.width != clip.crop.width || clip.scale.height != clip.crop.height {
-        filters.push(format!("scale={}:{}", clip.scale.width, clip.scale.height));
+        if clip.upscale_quality == UpscaleQuality::High {
+            filters.push(format!(
+                "scale={}:{}:flags=lanczos",
+                clip.scale.width, clip.scale.height
+            ));
+            filters.push("unsharp=5:5:0.6:5:5:0.0".to_string());
+        } else {
+            filters.push(format!("scale={}:{}", clip.scale.width, clip.scale.height));
+        }
     }
 
     filters.push("setsar=1".to_string());
@@ -666,6 +684,7 @@ mod tests {
                 width: 320,
                 height: 180,
             },
+            upscale_quality: UpscaleQuality::Standard,
             simulator_extend: false,
             include_audio: true,
         };
@@ -717,6 +736,7 @@ mod tests {
                         width: 320,
                         height: 180,
                     },
+                    upscale_quality: UpscaleQuality::Standard,
                     simulator_extend: false,
                 },
                 BatchClip {
@@ -739,6 +759,7 @@ mod tests {
                         width: 320,
                         height: 180,
                     },
+                    upscale_quality: UpscaleQuality::Standard,
                     simulator_extend: false,
                 },
             ],
@@ -788,6 +809,7 @@ mod tests {
                         width: 320,
                         height: 180,
                     },
+                    upscale_quality: UpscaleQuality::Standard,
                     simulator_extend: false,
                 },
                 BatchClip {
@@ -810,6 +832,7 @@ mod tests {
                         width: 320,
                         height: 180,
                     },
+                    upscale_quality: UpscaleQuality::Standard,
                     simulator_extend: false,
                 },
             ],
@@ -857,6 +880,7 @@ mod tests {
                 width: SIMULATOR_EXTEND_WIDTH,
                 height: SIMULATOR_EXTEND_HEIGHT,
             },
+            upscale_quality: UpscaleQuality::High,
             simulator_extend: true,
             include_audio: true,
         };
@@ -873,6 +897,38 @@ mod tests {
             "expected duration near 1.5s, got {}",
             probe.duration
         );
+    }
+
+    #[test]
+    fn high_quality_upscale_uses_lanczos_and_unsharp() {
+        let clip = BatchClip {
+            name: "hq".to_string(),
+            crop: CropRect {
+                x: 0,
+                y: 0,
+                width: 320,
+                height: 180,
+            },
+            trim: TrimRange {
+                start: 0.0,
+                end: 1.0,
+            },
+            flip: FlipState {
+                horizontal: false,
+                vertical: false,
+            },
+            scale: ScaleSize {
+                width: 1920,
+                height: 1080,
+            },
+            upscale_quality: UpscaleQuality::High,
+            simulator_extend: false,
+        };
+
+        let filter = build_filter_chain(&clip);
+
+        assert!(filter.contains("scale=1920:1080:flags=lanczos"));
+        assert!(filter.contains("unsharp=5:5:0.6:5:5:0.0"));
     }
 }
 

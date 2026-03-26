@@ -4,6 +4,7 @@ import type {
   FlipState,
   OutputSize,
   TrimRange,
+  UpscaleQuality,
 } from './types'
 
 export const SIMULATOR_EXTEND_OUTPUT = {
@@ -367,6 +368,7 @@ export function buildFilterChain(
   crop: CropRect,
   flip: FlipState,
   scale: OutputSize,
+  upscaleQuality: UpscaleQuality,
 ) {
   const filters = [`crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`]
 
@@ -379,7 +381,12 @@ export function buildFilterChain(
   }
 
   if (scale.width !== crop.width || scale.height !== crop.height) {
-    filters.push(`scale=${scale.width}:${scale.height}`)
+    if (upscaleQuality === 'high') {
+      filters.push(`scale=${scale.width}:${scale.height}:flags=lanczos`)
+      filters.push('unsharp=5:5:0.6:5:5:0.0')
+    } else {
+      filters.push(`scale=${scale.width}:${scale.height}`)
+    }
   }
 
   filters.push('setsar=1')
@@ -425,10 +432,13 @@ export function buildFfmpegPreview(
   crop: CropRect,
   flip: FlipState,
   scale: OutputSize,
+  upscaleQuality: UpscaleQuality,
   simulatorExtend: boolean,
   includeAudio: boolean,
 ) {
-  const filters = simulatorExtend ? buildSimulatorFilterPreview(crop, flip) : buildFilterChain(crop, flip, scale)
+  const filters = simulatorExtend
+    ? buildSimulatorFilterPreview(crop, flip)
+    : buildFilterChain(crop, flip, scale, upscaleQuality)
   const audioArgs = includeAudio ? ['-c:a aac', '-b:a 192k'] : ['-an']
   const trimDuration = Math.max(0, trim.end - trim.start)
 
