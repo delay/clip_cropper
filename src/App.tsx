@@ -1585,7 +1585,7 @@ function App() {
                 Export a 5760 × 1080 simulator frame with a 1920 × 1080 center image and blurred side-screen fill.
               </span>
               <span className="field-help">
-                The center screen stays at standard 1920 × 1080 and the side screens use blurred edge fill.
+                The center screen is stretched to fill 1920 × 1080 with no top or bottom letterboxing, and the side screens use blurred edge fill.
               </span>
             </label>
 

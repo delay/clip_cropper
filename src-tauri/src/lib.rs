@@ -789,18 +789,14 @@ fn build_simulator_filter_chain(clip: &BatchClip) -> String {
     }
 
     scaled_filters.push(format!(
-        "scale={}:{}:force_original_aspect_ratio=decrease:flags=lanczos",
+        "scale={}:{}:flags=lanczos",
         SIMULATOR_CENTER_WIDTH, SIMULATOR_CENTER_HEIGHT
     ));
 
     [
         format!(
-            "[0:v]{},split=3[centersrc][leftsrc][rightsrc]",
+            "[0:v]{},split=3[center][leftsrc][rightsrc]",
             scaled_filters.join(",")
-        ),
-        format!(
-            "[centersrc]pad={}:{}:(ow-iw)/2:(oh-ih)/2[center]",
-            SIMULATOR_CENTER_WIDTH, SIMULATOR_CENTER_HEIGHT
         ),
         format!(
             "[leftsrc]crop='if(gte(iw,{0}),{0},iw)':ih:0:0,scale={1}:{2}:flags=lanczos,gblur=sigma=55,eq=brightness=-0.07[left]",
@@ -1196,9 +1192,10 @@ mod tests {
 
         let filter = build_simulator_filter_chain(&clip);
 
-        assert!(filter.contains("split=3[centersrc][leftsrc][rightsrc]"));
-        assert!(filter.contains("[centersrc]pad=1920:1080:(ow-iw)/2:(oh-ih)/2[center]"));
+        assert!(filter.contains("split=3[center][leftsrc][rightsrc]"));
+        assert!(filter.contains("scale=1920:1080:flags=lanczos"));
         assert!(filter.contains("[left][center][right]hstack=inputs=3,setsar=1[vout]"));
+        assert!(!filter.contains("pad=1920:1080"));
         assert!(!filter.contains("overlay="));
         assert!(!filter.contains("nearlsrc"));
         assert!(!filter.contains("farlsrc"));

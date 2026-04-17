@@ -399,14 +399,13 @@ function buildSimulatorFilterPreview(crop: CropRect, flip: FlipState) {
     `crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`,
     flip.horizontal ? 'hflip' : null,
     flip.vertical ? 'vflip' : null,
-    `scale=${SIMULATOR_CENTER_OUTPUT.width}:${SIMULATOR_CENTER_OUTPUT.height}:force_original_aspect_ratio=decrease:flags=lanczos`,
+    `scale=${SIMULATOR_CENTER_OUTPUT.width}:${SIMULATOR_CENTER_OUTPUT.height}:flags=lanczos`,
   ]
     .filter(Boolean)
     .join(',')
 
   return [
-    `[0:v]${scaledFilters},split=3[centersrc][leftsrc][rightsrc]`,
-    `[centersrc]pad=${SIMULATOR_CENTER_OUTPUT.width}:${SIMULATOR_CENTER_OUTPUT.height}:(ow-iw)/2:(oh-ih)/2[center]`,
+    `[0:v]${scaledFilters},split=3[center][leftsrc][rightsrc]`,
     `[leftsrc]crop='if(gte(iw,${SIMULATOR_EDGE_SAMPLE_WIDTH}),${SIMULATOR_EDGE_SAMPLE_WIDTH},iw)':ih:0:0,scale=${SIMULATOR_SIDE_WIDTH}:${SIMULATOR_EXTEND_OUTPUT.height}:flags=lanczos,gblur=sigma=55,eq=brightness=-0.07[left]`,
     `[rightsrc]crop='if(gte(iw,${SIMULATOR_EDGE_SAMPLE_WIDTH}),${SIMULATOR_EDGE_SAMPLE_WIDTH},iw)':ih:'if(gte(iw,${SIMULATOR_EDGE_SAMPLE_WIDTH}),iw-${SIMULATOR_EDGE_SAMPLE_WIDTH},0)':0,scale=${SIMULATOR_SIDE_WIDTH}:${SIMULATOR_EXTEND_OUTPUT.height}:flags=lanczos,gblur=sigma=55,eq=brightness=-0.07[right]`,
     `[left][center][right]hstack=inputs=3,setsar=1[vout]`,
