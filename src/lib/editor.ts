@@ -13,14 +13,12 @@ export const SIMULATOR_EXTEND_OUTPUT = {
 } as const
 
 export const SIMULATOR_CENTER_OUTPUT = {
-  width: 2560,
+  width: 1920,
   height: 1080,
 } as const
 
 const SIMULATOR_EDGE_SAMPLE_WIDTH = 308
 const SIMULATOR_SIDE_WIDTH = (SIMULATOR_EXTEND_OUTPUT.width - SIMULATOR_CENTER_OUTPUT.width) / 2
-const SIMULATOR_NEAR_BLEND_WIDTH = 320
-const SIMULATOR_FAR_BLEND_WIDTH = 720
 
 export const ASPECT_PRESETS: Array<{
   id: AspectPresetId
@@ -70,13 +68,11 @@ export function createDefaultCrop(
   }
 
   const safeRatio = Math.max(0.1, ratio)
-  const sourceRatio = sourceWidth / sourceHeight
-  const inset = 0.86
-  let width = sourceWidth * inset
+  let width = sourceWidth
   let height = width / safeRatio
 
-  if (sourceRatio < safeRatio || height > sourceHeight * inset) {
-    height = sourceHeight * inset
+  if (height > sourceHeight) {
+    height = sourceHeight
     width = height * safeRatio
   }
 
@@ -399,29 +395,21 @@ function formatCliTime(seconds: number) {
 }
 
 function buildSimulatorFilterPreview(crop: CropRect, flip: FlipState) {
-  const baseFilters = [
+  const scaledFilters = [
     `crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`,
     flip.horizontal ? 'hflip' : null,
     flip.vertical ? 'vflip' : null,
     `scale=${SIMULATOR_CENTER_OUTPUT.width}:${SIMULATOR_CENTER_OUTPUT.height}:force_original_aspect_ratio=decrease:flags=lanczos`,
-    `pad=${SIMULATOR_CENTER_OUTPUT.width}:${SIMULATOR_CENTER_OUTPUT.height}:(ow-iw)/2:(oh-ih)/2`,
   ]
     .filter(Boolean)
     .join(',')
 
   return [
-    `[0:v]${baseFilters},split=7[center][leftsrc][rightsrc][nearlsrc][nearrsrc][farlsrc][farrsrc]`,
-    `[leftsrc]crop=${SIMULATOR_EDGE_SAMPLE_WIDTH}:${SIMULATOR_CENTER_OUTPUT.height}:0:0,scale=${SIMULATOR_SIDE_WIDTH}:${SIMULATOR_EXTEND_OUTPUT.height}:flags=lanczos,gblur=sigma=55,eq=brightness=-0.07[left]`,
-    `[rightsrc]crop=${SIMULATOR_EDGE_SAMPLE_WIDTH}:${SIMULATOR_CENTER_OUTPUT.height}:${SIMULATOR_CENTER_OUTPUT.width - SIMULATOR_EDGE_SAMPLE_WIDTH}:0,scale=${SIMULATOR_SIDE_WIDTH}:${SIMULATOR_EXTEND_OUTPUT.height}:flags=lanczos,gblur=sigma=55,eq=brightness=-0.07[right]`,
-    `[farlsrc]crop=${SIMULATOR_FAR_BLEND_WIDTH}:${SIMULATOR_CENTER_OUTPUT.height}:0:0,gblur=sigma=20,format=rgba,colorchannelmixer=aa=0.18[farl]`,
-    `[farrsrc]crop=${SIMULATOR_FAR_BLEND_WIDTH}:${SIMULATOR_CENTER_OUTPUT.height}:${SIMULATOR_CENTER_OUTPUT.width - SIMULATOR_FAR_BLEND_WIDTH}:0,gblur=sigma=20,format=rgba,colorchannelmixer=aa=0.18[farr]`,
-    `[nearlsrc]crop=${SIMULATOR_NEAR_BLEND_WIDTH}:${SIMULATOR_CENTER_OUTPUT.height}:0:0,gblur=sigma=8,format=rgba,colorchannelmixer=aa=0.28[nearl]`,
-    `[nearrsrc]crop=${SIMULATOR_NEAR_BLEND_WIDTH}:${SIMULATOR_CENTER_OUTPUT.height}:${SIMULATOR_CENTER_OUTPUT.width - SIMULATOR_NEAR_BLEND_WIDTH}:0,gblur=sigma=8,format=rgba,colorchannelmixer=aa=0.28[nearr]`,
-    `[left][center][right]hstack=inputs=3[stack]`,
-    `[stack][farl]overlay=${SIMULATOR_SIDE_WIDTH - SIMULATOR_FAR_BLEND_WIDTH}:0[tmp1]`,
-    `[tmp1][farr]overlay=${SIMULATOR_SIDE_WIDTH + SIMULATOR_CENTER_OUTPUT.width}:0[tmp2]`,
-    `[tmp2][nearl]overlay=${SIMULATOR_SIDE_WIDTH - SIMULATOR_NEAR_BLEND_WIDTH}:0[tmp3]`,
-    `[tmp3][nearr]overlay=${SIMULATOR_SIDE_WIDTH + SIMULATOR_CENTER_OUTPUT.width}:0,setsar=1[vout]`,
+    `[0:v]${scaledFilters},split=3[centersrc][leftsrc][rightsrc]`,
+    `[centersrc]pad=${SIMULATOR_CENTER_OUTPUT.width}:${SIMULATOR_CENTER_OUTPUT.height}:(ow-iw)/2:(oh-ih)/2[center]`,
+    `[leftsrc]crop='if(gte(iw,${SIMULATOR_EDGE_SAMPLE_WIDTH}),${SIMULATOR_EDGE_SAMPLE_WIDTH},iw)':ih:0:0,scale=${SIMULATOR_SIDE_WIDTH}:${SIMULATOR_EXTEND_OUTPUT.height}:flags=lanczos,gblur=sigma=55,eq=brightness=-0.07[left]`,
+    `[rightsrc]crop='if(gte(iw,${SIMULATOR_EDGE_SAMPLE_WIDTH}),${SIMULATOR_EDGE_SAMPLE_WIDTH},iw)':ih:'if(gte(iw,${SIMULATOR_EDGE_SAMPLE_WIDTH}),iw-${SIMULATOR_EDGE_SAMPLE_WIDTH},0)':0,scale=${SIMULATOR_SIDE_WIDTH}:${SIMULATOR_EXTEND_OUTPUT.height}:flags=lanczos,gblur=sigma=55,eq=brightness=-0.07[right]`,
+    `[left][center][right]hstack=inputs=3,setsar=1[vout]`,
   ].join(';')
 }
 

@@ -1,20 +1,22 @@
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tempfile::TempDir;
+use tauri::Emitter;
 
 const SIMULATOR_EXTEND_WIDTH: u32 = 5760;
 const SIMULATOR_EXTEND_HEIGHT: u32 = 1080;
-const SIMULATOR_CENTER_WIDTH: u32 = 2560;
+const SIMULATOR_CENTER_WIDTH: u32 = 1920;
 const SIMULATOR_CENTER_HEIGHT: u32 = 1080;
 const SIMULATOR_EDGE_SAMPLE_WIDTH: u32 = 308;
-const SIMULATOR_NEAR_BLEND_WIDTH: u32 = 320;
-const SIMULATOR_FAR_BLEND_WIDTH: u32 = 720;
 const SIMULATOR_SIDE_WIDTH: u32 = (SIMULATOR_EXTEND_WIDTH - SIMULATOR_CENTER_WIDTH) / 2;
+const EXPORT_PROGRESS_EVENT: &str = "export-progress";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,6 +117,26 @@ struct BatchExportResult {
     ffmpeg_commands: Vec<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportProgress {
+    current_step: usize,
+    total_steps: usize,
+    step_label: String,
+    step_progress: f64,
+    overall_progress: f64,
+}
+
+#[derive(Debug, Clone)]
+struct ProgressPlan {
+    current_step: usize,
+    total_steps: usize,
+    step_label: String,
+    overall_start: f64,
+    overall_span: f64,
+    duration_seconds: f64,
+}
+
 #[tauri::command]
 fn pick_video() -> Result<Option<VideoProbe>, String> {
     let file = FileDialog::new()
@@ -128,7 +150,7 @@ fn pick_video() -> Result<Option<VideoProbe>, String> {
 }
 
 #[tauri::command]
-fn export_video(request: ExportRequest) -> Result<Option<ExportResult>, String> {
+fn export_video(window: tauri::Window, request: ExportRequest) -> Result<Option<ExportResult>, String> {
     let output_path = FileDialog::new()
         .set_file_name(&request.suggested_filename)
         .add_filter("MP4", &["mp4"])
@@ -138,32 +160,55 @@ fn export_video(request: ExportRequest) -> Result<Option<ExportResult>, String> 
         return Ok(None);
     };
 
-    export_single_to_path(&request, &output_path).map(Some)
+    let mut emit_progress = |progress: ExportProgress| {
+        let _ = window.emit(EXPORT_PROGRESS_EVENT, &progress);
+    };
+
+    export_single_to_path_with_progress(&request, &output_path, &mut emit_progress).map(Some)
 }
 
 #[tauri::command]
-fn export_video_batch(request: BatchExportRequest) -> Result<Option<BatchExportResult>, String> {
+fn export_video_batch(
+    window: tauri::Window,
+    request: BatchExportRequest,
+) -> Result<Option<BatchExportResult>, String> {
     if request.clips.is_empty() {
         return Err("No saved selections to export.".to_string());
     }
 
+    let mut emit_progress = |progress: ExportProgress| {
+        let _ = window.emit(EXPORT_PROGRESS_EVENT, &progress);
+    };
+
     match request.export_mode.as_str() {
-        "individual" => export_individual_batch(request).map(Some),
-        "continuous" => export_continuous_batch(request).map(Some),
+        "individual" => export_individual_batch_with_progress(request, &mut emit_progress).map(Some),
+        "continuous" => export_continuous_batch_with_progress(request, &mut emit_progress).map(Some),
         other => Err(format!("Unsupported export mode: {other}")),
     }
 }
 
-fn export_individual_batch(request: BatchExportRequest) -> Result<BatchExportResult, String> {
+fn export_individual_batch_with_progress<F>(
+    request: BatchExportRequest,
+    on_progress: &mut F,
+) -> Result<BatchExportResult, String>
+where
+    F: FnMut(ExportProgress),
+{
     let output_folder = FileDialog::new().pick_folder();
     let Some(output_folder) = output_folder else {
         return Err("Export cancelled.".to_string());
     };
 
-    export_individual_batch_to_folder(&request, &output_folder)
+    export_individual_batch_to_folder_with_progress(&request, &output_folder, on_progress)
 }
 
-fn export_continuous_batch(request: BatchExportRequest) -> Result<BatchExportResult, String> {
+fn export_continuous_batch_with_progress<F>(
+    request: BatchExportRequest,
+    on_progress: &mut F,
+) -> Result<BatchExportResult, String>
+where
+    F: FnMut(ExportProgress),
+{
     let output_path = FileDialog::new()
         .set_file_name(&format!("{}-sequence.mp4", sanitize_filename(&request.base_filename)))
         .add_filter("MP4", &["mp4"])
@@ -173,10 +218,23 @@ fn export_continuous_batch(request: BatchExportRequest) -> Result<BatchExportRes
         return Err("Export cancelled.".to_string());
     };
 
-    export_continuous_batch_to_path(&request, &output_path)
+    export_continuous_batch_to_path_with_progress(&request, &output_path, on_progress)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn export_single_to_path(request: &ExportRequest, output_path: &Path) -> Result<ExportResult, String> {
+    let mut ignore_progress = |_| {};
+    export_single_to_path_with_progress(request, output_path, &mut ignore_progress)
+}
+
+fn export_single_to_path_with_progress<F>(
+    request: &ExportRequest,
+    output_path: &Path,
+    on_progress: &mut F,
+) -> Result<ExportResult, String>
+where
+    F: FnMut(ExportProgress),
+{
     let clip = BatchClip {
         name: request.suggested_filename.clone(),
         crop: request.crop.clone(),
@@ -189,7 +247,15 @@ fn export_single_to_path(request: &ExportRequest, output_path: &Path) -> Result<
 
     validate_clip(&clip)?;
     let args = build_clip_args(&request.input_path, &clip, request.include_audio, output_path);
-    run_ffmpeg(&args)?;
+    let progress = ProgressPlan {
+        current_step: 1,
+        total_steps: 1,
+        step_label: "Encoding export".to_string(),
+        overall_start: 0.0,
+        overall_span: 1.0,
+        duration_seconds: clip_duration(&clip),
+    };
+    run_ffmpeg_with_progress(&args, &progress, on_progress)?;
 
     Ok(ExportResult {
         output_path: output_path.display().to_string(),
@@ -197,13 +263,34 @@ fn export_single_to_path(request: &ExportRequest, output_path: &Path) -> Result<
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn export_individual_batch_to_folder(
     request: &BatchExportRequest,
     output_folder: &Path,
 ) -> Result<BatchExportResult, String> {
+    let mut ignore_progress = |_| {};
+    export_individual_batch_to_folder_with_progress(request, output_folder, &mut ignore_progress)
+}
+
+fn export_individual_batch_to_folder_with_progress<F>(
+    request: &BatchExportRequest,
+    output_folder: &Path,
+    on_progress: &mut F,
+) -> Result<BatchExportResult, String>
+where
+    F: FnMut(ExportProgress),
+{
     let base_name = sanitize_filename(&request.base_filename);
     let mut output_paths = Vec::with_capacity(request.clips.len());
     let mut ffmpeg_commands = Vec::with_capacity(request.clips.len());
+    let total_duration = request
+        .clips
+        .iter()
+        .map(clip_duration)
+        .sum::<f64>()
+        .max(0.001);
+    let total_steps = request.clips.len();
+    let mut completed_share = 0.0;
 
     for (index, clip) in request.clips.iter().enumerate() {
         validate_clip(clip)?;
@@ -211,7 +298,17 @@ fn export_individual_batch_to_folder(
         let filename = format!("{base_name}-{:02}-{clip_name}.mp4", index + 1);
         let output_path = output_folder.join(filename);
         let args = build_clip_args(&request.input_path, clip, request.include_audio, &output_path);
-        run_ffmpeg(&args)?;
+        let clip_share = clip_duration(clip) / total_duration;
+        let progress = ProgressPlan {
+            current_step: index + 1,
+            total_steps,
+            step_label: format!("Encoding clip {} of {}", index + 1, total_steps),
+            overall_start: completed_share,
+            overall_span: clip_share,
+            duration_seconds: clip_duration(clip),
+        };
+        run_ffmpeg_with_progress(&args, &progress, on_progress)?;
+        completed_share += clip_share;
         output_paths.push(output_path.display().to_string());
         ffmpeg_commands.push(args);
     }
@@ -222,10 +319,23 @@ fn export_individual_batch_to_folder(
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn export_continuous_batch_to_path(
     request: &BatchExportRequest,
     output_path: &Path,
 ) -> Result<BatchExportResult, String> {
+    let mut ignore_progress = |_| {};
+    export_continuous_batch_to_path_with_progress(request, output_path, &mut ignore_progress)
+}
+
+fn export_continuous_batch_to_path_with_progress<F>(
+    request: &BatchExportRequest,
+    output_path: &Path,
+    on_progress: &mut F,
+) -> Result<BatchExportResult, String>
+where
+    F: FnMut(ExportProgress),
+{
     let Some(first_clip) = request.clips.first() else {
         return Err("No saved selections to export.".to_string());
     };
@@ -245,11 +355,30 @@ fn export_continuous_batch_to_path(
     let temp_dir = TempDir::new().map_err(|error| format!("Failed to create temp folder: {error}"))?;
     let mut ffmpeg_commands = Vec::with_capacity(request.clips.len() + 1);
     let mut segment_paths = Vec::with_capacity(request.clips.len());
+    let segment_duration = request
+        .clips
+        .iter()
+        .map(clip_duration)
+        .sum::<f64>()
+        .max(0.001);
+    let total_work = (segment_duration * 2.0).max(0.001);
+    let total_steps = request.clips.len() + 1;
+    let mut completed_share = 0.0;
 
     for (index, clip) in request.clips.iter().enumerate() {
         let segment_path = temp_dir.path().join(format!("segment-{index:02}.mp4"));
         let args = build_clip_args(&request.input_path, clip, request.include_audio, &segment_path);
-        run_ffmpeg(&args)?;
+        let clip_share = clip_duration(clip) / total_work;
+        let progress = ProgressPlan {
+            current_step: index + 1,
+            total_steps,
+            step_label: format!("Encoding segment {} of {}", index + 1, request.clips.len()),
+            overall_start: completed_share,
+            overall_span: clip_share,
+            duration_seconds: clip_duration(clip),
+        };
+        run_ffmpeg_with_progress(&args, &progress, on_progress)?;
+        completed_share += clip_share;
         ffmpeg_commands.push(args);
         segment_paths.push(segment_path);
     }
@@ -267,7 +396,15 @@ fn export_continuous_batch_to_path(
         "copy".to_string(),
         output_path.display().to_string(),
     ];
-    run_ffmpeg(&concat_args)?;
+    let concat_progress = ProgressPlan {
+        current_step: total_steps,
+        total_steps,
+        step_label: "Combining segments".to_string(),
+        overall_start: completed_share,
+        overall_span: segment_duration / total_work,
+        duration_seconds: segment_duration,
+    };
+    run_ffmpeg_with_progress(&concat_args, &concat_progress, on_progress)?;
     ffmpeg_commands.push(concat_args);
 
     Ok(BatchExportResult {
@@ -315,18 +452,144 @@ fn escape_concat_path(path: &Path) -> String {
     path.display().to_string().replace('\'', "'\\''")
 }
 
-fn run_ffmpeg(args: &[String]) -> Result<(), String> {
-    let output = Command::new("ffmpeg")
+fn run_ffmpeg_with_progress<F>(
+    args: &[String],
+    progress_plan: &ProgressPlan,
+    on_progress: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(ExportProgress),
+{
+    emit_progress(on_progress, progress_plan, 0.0);
+
+    let mut child = Command::new("ffmpeg")
+        .args(["-progress", "pipe:1", "-nostats"])
         .args(args)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("Failed to run ffmpeg: {error}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture ffmpeg progress output.".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture ffmpeg error output.".to_string())?;
+
+    let stderr_reader = thread::spawn(move || -> Result<String, String> {
+        let mut stderr_output = String::new();
+        BufReader::new(stderr)
+            .read_to_string(&mut stderr_output)
+            .map_err(|error| format!("Failed to read ffmpeg error output: {error}"))?;
+        Ok(stderr_output)
+    });
+
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| format!("Failed to read ffmpeg progress output: {error}"))?;
+
+        if let Some(raw_time) = line.strip_prefix("out_time=") {
+            if let Some(seconds) = parse_ffmpeg_timecode(raw_time) {
+                let step_progress = if progress_plan.duration_seconds <= 0.0 {
+                    0.0
+                } else {
+                    seconds / progress_plan.duration_seconds
+                };
+                emit_progress(on_progress, progress_plan, step_progress);
+            }
+            continue;
+        }
+
+        if line == "progress=end" {
+            emit_progress(on_progress, progress_plan, 1.0);
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Failed to wait for ffmpeg: {error}"))?;
+    let stderr_output = stderr_reader
+        .join()
+        .map_err(|_| "Failed to join ffmpeg error reader.".to_string())??;
+
+    if !status.success() {
+        let stderr = stderr_output.trim();
+        return Err(if stderr.is_empty() {
+            format!("ffmpeg exited with status {status}")
+        } else {
+            stderr.to_string()
+        });
+    }
+
+    emit_progress(on_progress, progress_plan, 1.0);
+    Ok(())
+}
+
+fn emit_progress<F>(on_progress: &mut F, plan: &ProgressPlan, step_progress: f64)
+where
+    F: FnMut(ExportProgress),
+{
+    let step_progress = step_progress.clamp(0.0, 1.0);
+    on_progress(ExportProgress {
+        current_step: plan.current_step,
+        total_steps: plan.total_steps,
+        step_label: plan.step_label.clone(),
+        step_progress,
+        overall_progress: (plan.overall_start + (plan.overall_span * step_progress)).clamp(0.0, 1.0),
+    });
+}
+
+fn clip_duration(clip: &BatchClip) -> f64 {
+    (clip.trim.end - clip.trim.start).max(0.001)
+}
+
+fn parse_ffmpeg_timecode(value: &str) -> Option<f64> {
+    let mut parts = value.split(':');
+    let hours = parts.next()?.parse::<f64>().ok()?;
+    let minutes = parts.next()?.parse::<f64>().ok()?;
+    let seconds = parts.next()?.parse::<f64>().ok()?;
+
+    if parts.next().is_some() {
+        return None;
+    }
+
+    Some((hours * 3600.0) + (minutes * 60.0) + seconds)
+}
+
+#[cfg(test)]
+fn sample_video_pixel(path: &Path, x: u32, y: u32) -> Result<[u8; 3], String> {
+    let filter = format!("crop=1:1:{x}:{y},format=rgb24");
+    let output = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-ss",
+            "0.5",
+            "-i",
+            &path.display().to_string(),
+            "-vf",
+            &filter,
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-",
+        ])
+        .output()
+        .map_err(|error| format!("Failed to sample video pixel: {error}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(stderr.trim().to_string());
     }
 
-    Ok(())
+    if output.stdout.len() < 3 {
+        return Err("Failed to read sampled pixel.".to_string());
+    }
+
+    Ok([output.stdout[0], output.stdout[1], output.stdout[2]])
 }
 
 fn build_clip_args(
@@ -512,82 +775,46 @@ fn build_filter_chain(clip: &BatchClip) -> String {
 }
 
 fn build_simulator_filter_chain(clip: &BatchClip) -> String {
-    let mut base_filters = vec![format!(
+    let mut scaled_filters = vec![format!(
         "crop={}:{}:{}:{}",
         clip.crop.width, clip.crop.height, clip.crop.x, clip.crop.y
     )];
 
     if clip.flip.horizontal {
-        base_filters.push("hflip".to_string());
+        scaled_filters.push("hflip".to_string());
     }
 
     if clip.flip.vertical {
-        base_filters.push("vflip".to_string());
+        scaled_filters.push("vflip".to_string());
     }
 
-    base_filters.push(format!(
+    scaled_filters.push(format!(
         "scale={}:{}:force_original_aspect_ratio=decrease:flags=lanczos",
-        SIMULATOR_CENTER_WIDTH, SIMULATOR_CENTER_HEIGHT
-    ));
-    base_filters.push(format!(
-        "pad={}:{}:(ow-iw)/2:(oh-ih)/2",
         SIMULATOR_CENTER_WIDTH, SIMULATOR_CENTER_HEIGHT
     ));
 
     [
-        format!("[0:v]{},split=7[center][leftsrc][rightsrc][nearlsrc][nearrsrc][farlsrc][farrsrc]", base_filters.join(",")),
         format!(
-            "[leftsrc]crop={}:{}:0:0,scale={}:{}:flags=lanczos,gblur=sigma=55,eq=brightness=-0.07[left]",
+            "[0:v]{},split=3[centersrc][leftsrc][rightsrc]",
+            scaled_filters.join(",")
+        ),
+        format!(
+            "[centersrc]pad={}:{}:(ow-iw)/2:(oh-ih)/2[center]",
+            SIMULATOR_CENTER_WIDTH, SIMULATOR_CENTER_HEIGHT
+        ),
+        format!(
+            "[leftsrc]crop='if(gte(iw,{0}),{0},iw)':ih:0:0,scale={1}:{2}:flags=lanczos,gblur=sigma=55,eq=brightness=-0.07[left]",
             SIMULATOR_EDGE_SAMPLE_WIDTH,
-            SIMULATOR_CENTER_HEIGHT,
             SIMULATOR_SIDE_WIDTH,
             SIMULATOR_EXTEND_HEIGHT
         ),
         format!(
-            "[rightsrc]crop={}:{}:{}:0,scale={}:{}:flags=lanczos,gblur=sigma=55,eq=brightness=-0.07[right]",
+            "[rightsrc]crop='if(gte(iw,{0}),{0},iw)':ih:'if(gte(iw,{0}),iw-{0},0)':0,scale={1}:{2}:flags=lanczos,gblur=sigma=55,eq=brightness=-0.07[right]",
             SIMULATOR_EDGE_SAMPLE_WIDTH,
-            SIMULATOR_CENTER_HEIGHT,
-            SIMULATOR_CENTER_WIDTH - SIMULATOR_EDGE_SAMPLE_WIDTH,
             SIMULATOR_SIDE_WIDTH,
             SIMULATOR_EXTEND_HEIGHT
         ),
-        format!(
-            "[farlsrc]crop={}:{}:0:0,gblur=sigma=20,format=rgba,colorchannelmixer=aa=0.18[farl]",
-            SIMULATOR_FAR_BLEND_WIDTH, SIMULATOR_CENTER_HEIGHT
-        ),
-        format!(
-            "[farrsrc]crop={}:{}:{}:0,gblur=sigma=20,format=rgba,colorchannelmixer=aa=0.18[farr]",
-            SIMULATOR_FAR_BLEND_WIDTH,
-            SIMULATOR_CENTER_HEIGHT,
-            SIMULATOR_CENTER_WIDTH - SIMULATOR_FAR_BLEND_WIDTH
-        ),
-        format!(
-            "[nearlsrc]crop={}:{}:0:0,gblur=sigma=8,format=rgba,colorchannelmixer=aa=0.28[nearl]",
-            SIMULATOR_NEAR_BLEND_WIDTH, SIMULATOR_CENTER_HEIGHT
-        ),
-        format!(
-            "[nearrsrc]crop={}:{}:{}:0,gblur=sigma=8,format=rgba,colorchannelmixer=aa=0.28[nearr]",
-            SIMULATOR_NEAR_BLEND_WIDTH,
-            SIMULATOR_CENTER_HEIGHT,
-            SIMULATOR_CENTER_WIDTH - SIMULATOR_NEAR_BLEND_WIDTH
-        ),
-        "[left][center][right]hstack=inputs=3[stack]".to_string(),
-        format!(
-            "[stack][farl]overlay={}:0[tmp1]",
-            SIMULATOR_SIDE_WIDTH - SIMULATOR_FAR_BLEND_WIDTH
-        ),
-        format!(
-            "[tmp1][farr]overlay={}:0[tmp2]",
-            SIMULATOR_SIDE_WIDTH + SIMULATOR_CENTER_WIDTH
-        ),
-        format!(
-            "[tmp2][nearl]overlay={}:0[tmp3]",
-            SIMULATOR_SIDE_WIDTH - SIMULATOR_NEAR_BLEND_WIDTH
-        ),
-        format!(
-            "[tmp3][nearr]overlay={}:0,setsar=1[vout]",
-            SIMULATOR_SIDE_WIDTH + SIMULATOR_CENTER_WIDTH
-        ),
+        "[left][center][right]hstack=inputs=3,setsar=1[vout]".to_string(),
     ]
     .join(";")
 }
@@ -892,6 +1119,16 @@ mod tests {
         assert_eq!(probe.width, SIMULATOR_EXTEND_WIDTH);
         assert_eq!(probe.height, SIMULATOR_EXTEND_HEIGHT);
         assert!(probe.has_audio);
+        let left_pixel =
+            sample_video_pixel(&output_path, 10, SIMULATOR_EXTEND_HEIGHT / 2).expect("sample left edge");
+        let right_pixel = sample_video_pixel(
+            &output_path,
+            SIMULATOR_EXTEND_WIDTH - 10,
+            SIMULATOR_EXTEND_HEIGHT / 2,
+        )
+        .expect("sample right edge");
+        assert_ne!(left_pixel, [0, 0, 0], "left side fill should not be black");
+        assert_ne!(right_pixel, [0, 0, 0], "right side fill should not be black");
         assert!(
             (probe.duration - 1.5).abs() < 0.25,
             "expected duration near 1.5s, got {}",
@@ -929,6 +1166,42 @@ mod tests {
 
         assert!(filter.contains("scale=1920:1080:flags=lanczos"));
         assert!(filter.contains("unsharp=5:5:0.6:5:5:0.0"));
+    }
+
+    #[test]
+    fn simulator_extend_uses_single_stretched_fill_per_side() {
+        let clip = BatchClip {
+            name: "simulator".to_string(),
+            crop: CropRect {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 360,
+            },
+            trim: TrimRange {
+                start: 0.0,
+                end: 1.0,
+            },
+            flip: FlipState {
+                horizontal: false,
+                vertical: false,
+            },
+            scale: ScaleSize {
+                width: SIMULATOR_EXTEND_WIDTH,
+                height: SIMULATOR_EXTEND_HEIGHT,
+            },
+            upscale_quality: UpscaleQuality::High,
+            simulator_extend: true,
+        };
+
+        let filter = build_simulator_filter_chain(&clip);
+
+        assert!(filter.contains("split=3[centersrc][leftsrc][rightsrc]"));
+        assert!(filter.contains("[centersrc]pad=1920:1080:(ow-iw)/2:(oh-ih)/2[center]"));
+        assert!(filter.contains("[left][center][right]hstack=inputs=3,setsar=1[vout]"));
+        assert!(!filter.contains("overlay="));
+        assert!(!filter.contains("nearlsrc"));
+        assert!(!filter.contains("farlsrc"));
     }
 }
 

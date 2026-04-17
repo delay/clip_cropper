@@ -23,6 +23,7 @@ import {
   exportVideoBatchFromDesktop,
   exportVideoFromDesktop,
   isDesktopRuntime,
+  listenToExportProgress,
   pickVideoFromDesktop,
 } from './lib/tauri'
 import type {
@@ -30,6 +31,7 @@ import type {
   BatchExportPayload,
   CropRect,
   ExportPayload,
+  ExportProgress,
   FlipState,
   SavedSelection,
   TrimRange,
@@ -75,6 +77,10 @@ const PLACEHOLDER_THUMBS = 14
 
 function getFileStem(fileName: string) {
   return fileName.replace(/\.[^/.]+$/, '')
+}
+
+function formatExportPercent(progress: number) {
+  return `${Math.round(clamp(progress, 0, 1) * 100)}%`
 }
 
 function waitForVideoLoad(video: HTMLVideoElement) {
@@ -209,6 +215,7 @@ function App() {
   const [status, setStatus] = useState('Open a clip to start.')
   const [lastExportPath, setLastExportPath] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
+  const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null)
   const [previewSize, setPreviewSize] = useState({ width: 0, height: 0 })
   const [timelineThumbnails, setTimelineThumbnails] = useState<string[]>([])
   const [savedSelections, setSavedSelections] = useState<SavedSelection[]>([])
@@ -217,11 +224,6 @@ function App() {
 
   const handleSimulatorExtendChange = (checked: boolean) => {
     setSimulatorExtend(checked)
-
-    if (checked) {
-      setAspectPreset('ultrawide')
-      setRatioLocked(true)
-    }
   }
 
   const aspectRatio = useMemo(
@@ -396,6 +398,33 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!desktopRuntime) {
+      return
+    }
+
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    void listenToExportProgress((progress) => {
+      if (!cancelled) {
+        setExportProgress(progress)
+      }
+    }).then((dispose) => {
+      if (cancelled) {
+        dispose()
+        return
+      }
+
+      unlisten = dispose
+    })
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [desktopRuntime])
+
+  useEffect(() => {
     if (!video || video.width <= 0 || video.height <= 0) {
       setTimelineThumbnails([])
       return
@@ -492,8 +521,11 @@ function App() {
   }, [previewingRange, trim.end, trim.start])
 
   const setVideoSource = (nextVideo: VideoSource) => {
+    const sourceAspectRatio = nextVideo.width / nextVideo.height
     setVideo(nextVideo)
-    setCrop(createDefaultCrop(nextVideo.width, nextVideo.height, aspectRatio))
+    setAspectPreset('source')
+    setRatioLocked(true)
+    setCrop(createDefaultCrop(nextVideo.width, nextVideo.height, sourceAspectRatio))
     setTrim({ start: 0, end: nextVideo.duration })
     setCurrentTime(0)
     setPreviewingRange(false)
@@ -544,6 +576,8 @@ function App() {
       fps: 30,
       hasAudio: true,
     })
+    setAspectPreset('source')
+    setRatioLocked(true)
     setCrop(null)
     setTrim({ start: 0, end: 0 })
     setCurrentTime(0)
@@ -567,12 +601,13 @@ function App() {
       height: element.videoHeight,
       duration: element.duration,
     }
+    const sourceAspectRatio = nextVideo.width / nextVideo.height
 
     setVideo(nextVideo)
     setCrop((currentCrop) =>
       currentCrop
         ? fitCropToBounds(currentCrop, nextVideo.width, nextVideo.height)
-        : createDefaultCrop(nextVideo.width, nextVideo.height, aspectRatio),
+        : createDefaultCrop(nextVideo.width, nextVideo.height, sourceAspectRatio),
     )
     setTrim((currentRange) => {
       const end =
@@ -1005,6 +1040,18 @@ function App() {
     }
 
     setIsExporting(true)
+    setExportProgress({
+      currentStep: 1,
+      totalSteps: exportMode === 'continuous' ? selectionExportClips.length + 1 : selectionExportClips.length,
+      stepLabel: 'Preparing export',
+      stepProgress: 0,
+      overallProgress: 0,
+    })
+    setStatus(
+      exportMode === 'continuous'
+        ? 'Preparing continuous export...'
+        : `Preparing ${selectionExportClips.length}-clip export...`,
+    )
 
     try {
       const result = await exportVideoBatchFromDesktop(payload)
@@ -1044,6 +1091,14 @@ function App() {
     }
 
     setIsExporting(true)
+    setExportProgress({
+      currentStep: 1,
+      totalSteps: 1,
+      stepLabel: 'Preparing export',
+      stepProgress: 0,
+      overallProgress: 0,
+    })
+    setStatus('Preparing export...')
 
     try {
       const result = await exportVideoFromDesktop(payload)
@@ -1527,10 +1582,10 @@ function App() {
                 disabled={!normalizedCrop}
               />
               <span className="field-help">
-                Export a 5760 × 1080 simulator frame with a 2560 × 1080 center image and blurred side-screen fill.
+                Export a 5760 × 1080 simulator frame with a 1920 × 1080 center image and blurred side-screen fill.
               </span>
               <span className="field-help">
-                Enabling this switches the crop framing to 2560 × 1080 so the center image is not distorted.
+                The center screen stays at standard 1920 × 1080 and the side screens use blurred edge fill.
               </span>
             </label>
 
@@ -1609,6 +1664,33 @@ function App() {
             </button>
             {lastExportPath ? <span className="status-pill status-pill--ok">{lastExportPath}</span> : null}
           </div>
+
+          {isExporting && exportProgress ? (
+            <div className="export-progress" aria-live="polite">
+              <div className="export-progress__header">
+                <span>{exportProgress.stepLabel}</span>
+                <span>{formatExportPercent(exportProgress.overallProgress)}</span>
+              </div>
+              <div
+                className="export-progress__track"
+                role="progressbar"
+                aria-label="Export progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(clamp(exportProgress.overallProgress, 0, 1) * 100)}
+              >
+                <div
+                  className="export-progress__fill"
+                  style={{ width: `${Math.max(clamp(exportProgress.overallProgress, 0, 1) * 100, 2)}%` }}
+                />
+              </div>
+              {exportProgress.totalSteps > 1 ? (
+                <span className="export-progress__meta">
+                  Step {exportProgress.currentStep} of {exportProgress.totalSteps}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
 
           <div className="command-preview">
             <p className="field-label">Current ffmpeg command</p>

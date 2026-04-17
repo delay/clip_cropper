@@ -1,12 +1,16 @@
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 import type {
   BatchExportPayload,
   BatchExportResult,
   ExportPayload,
+  ExportProgress,
   ExportResult,
   VideoSource,
 } from './types'
+
+const EXPORT_PROGRESS_EVENT = 'export-progress'
 
 type DesktopProbe = {
   path: string
@@ -45,4 +49,10 @@ export async function exportVideoBatchFromDesktop(
   payload: BatchExportPayload,
 ): Promise<BatchExportResult | null> {
   return invoke<BatchExportResult | null>('export_video_batch', { request: payload })
+}
+
+export function listenToExportProgress(
+  handler: (progress: ExportProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<ExportProgress>(EXPORT_PROGRESS_EVENT, (event) => handler(event.payload))
 }

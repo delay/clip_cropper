@@ -52,6 +52,14 @@ export type ExportResult = {
   ffmpegArgs: string[]
 }
 
+export type ExportProgress = {
+  currentStep: number
+  totalSteps: number
+  stepLabel: string
+  stepProgress: number
+  overallProgress: number
+}
+
 export type SavedSelection = {
   id: string
   name: string

@@ -605,6 +605,41 @@
   margin-top: 16px;
 }
 
+.export-progress {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.export-progress__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-h);
+  font-size: 14px;
+}
+
+.export-progress__track {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid rgba(120, 145, 171, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.export-progress__fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4ca7ff 0%, #9ee7b4 100%);
+  transition: width 0.18s ease;
+}
+
+.export-progress__meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .command-preview {
   display: grid;
   gap: 10px;
